@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install -e . pytest ruff
+      - run: pip install -e ".[usb]" pytest ruff
       - run: ruff check .
       - run: python -m pytest
       - name: CLI smoke

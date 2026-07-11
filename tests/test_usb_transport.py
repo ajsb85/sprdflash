@@ -68,8 +68,8 @@ class TestUsbUnavailable:
     def test_open_maps_notimplemented_to_zadig_hint(self, monkeypatch):
         # on Windows/CDC, libusb raises NotImplementedError when claiming the
         # interface for I/O — verify that becomes the actionable Zadig hint
-        import usb.util
-        monkeypatch.setattr(usb.util, 'claim_interface',
+        usb_util = pytest.importorskip('usb.util')
+        monkeypatch.setattr(usb_util, 'claim_interface',
                             lambda *a, **k: (_ for _ in ()).throw(
                                 NotImplementedError('Operation not supported')))
         from sprdflash.usb_transport import UsbUnavailable
