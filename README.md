@@ -52,9 +52,15 @@ device's own USB descriptor.
 
 - Python ≥ 3.10, `pip install "sprdflash[usb]"` (the `[usb]` extra pulls in
   pyusb + a bundled libusb).
-- A module in **download mode** (BootROM port `0525:A4A7`). Enter it by holding
-  the boot key while powering on, or with `AT*DOWNLOAD=1` on the AT port (see
-  [pacflash](https://github.com/ajsb85/pacflash) for the automated mode switch).
+- A module in **download mode**. Two entry paths / USB identities are supported:
+  - **`1782:4D00`** — the *raw BootROM*, reached by strapping the **`USB_BOOT`**
+    pin high (to VDD_EXT / VDD_1V8, directly or via a pull-up) during reset.
+    This is the most reliable native target (plain BSL autobaud).
+  - **`0525:A4A7`** ("SPRD U2S Diag") — the soft-download interface exposed
+    after `AT*DOWNLOAD=1` on the AT port (see
+    [pacflash](https://github.com/ajsb85/pacflash) for the automated switch).
+
+  Endpoints are auto-discovered from the descriptor, so either identity works.
 - **A WinUSB/libusbK driver bound to the BootROM device.** On Windows the device
   ships with the CDC/usbser (COM-port) driver, through which libusb cannot do
   I/O. Use [Zadig](https://zadig.akeo.ie) once to replace the driver for USB

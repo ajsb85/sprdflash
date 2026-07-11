@@ -1,16 +1,26 @@
 """libusb (pyusb) transport for the Spreadtrum BootROM download gadget.
 
-The BootROM enumerates as a CDC-ACM device (USB 0525:A4A7, "SPRD U2S Diag")
-but the BSL protocol does **not** ride the CDC serial framing - it uses the
-raw bulk endpoints of the data interface, kicked off by a vendor control
-transfer. This mirrors the open-source ``iscle/sprdclient`` reference and the
-behaviour of the vendor ChannelD.dll.
+The BootROM enumerates as a CDC-ACM-style device but the BSL protocol does
+**not** ride the CDC serial framing - it uses the raw bulk endpoints of the
+data interface, kicked off by a vendor control transfer. This mirrors the
+open-source ``iscle/sprdclient`` and ``spd_dump`` references and the behaviour
+of the vendor ChannelD.dll.
 
-Wire-up (confirmed against the live device descriptor):
+Two download identities are supported (see ``BOOTROM_IDS``):
 
-- interface 1, class 0x0a (CDC-Data): bulk OUT ``0x02``, bulk IN ``0x81``
+- ``1782:4d00`` - the raw BootROM, presented when the ``USB_BOOT`` pin is
+  strapped high (to VDD_EXT / VDD_1V8, directly or via a pull-up) during
+  reset. This is the classic spd_dump target.
+- ``0525:a4a7`` ("SPRD U2S Diag") - the soft-download interface the module
+  exposes after ``AT*DOWNLOAD=1``.
+
+Wire-up (confirmed against the live 0525:a4a7 descriptor; auto-discovered for
+either identity):
+
+- CDC-Data interface: bulk OUT ``0x02``, bulk IN ``0x81`` (discovered, not
+  hardcoded, so both device identities work).
 - connect kick: control transfer ``bmRequestType=0x21, bRequest=0,
-  wValue=1, wIndex=0`` (asserts the line/activates the endpoints)
+  wValue=1, wIndex=0`` (asserts the line / activates the endpoints).
 - then a lone ``0x7e`` on the bulk OUT starts autobaud; the device answers a
   ``BSL_REP_VER`` frame on bulk IN.
 
@@ -25,11 +35,16 @@ import logging
 
 log = logging.getLogger('sprdflash')
 
-DOWNLOAD_VID = 0x0525
-DOWNLOAD_PID = 0xA4A7
-DATA_INTERFACE = 1
-EP_OUT = 0x02
-EP_IN = 0x81
+# Known Spreadtrum/UNISOC BootROM download identities. 1782:4d00 is the raw
+# BROM presented when the USB_BOOT pin is strapped high at reset (the classic
+# spd_dump target); 0525:a4a7 ("SPRD U2S Diag") is the soft-download interface
+# the module exposes after AT*DOWNLOAD=1. Endpoints and the data interface are
+# auto-discovered from the descriptor, so both work without per-device tuning.
+BOOTROM_IDS = [
+    (0x1782, 0x4D00),   # raw BootROM (USB_BOOT strapped)
+    (0x1782, 0x4D11),   # BootROM variant seen on some UIS8910 builds
+    (0x0525, 0xA4A7),   # SPRD U2S Diag (soft download)
+]
 
 # vendor connect kick (see module docstring)
 CTRL_REQUEST_TYPE = 0x21
@@ -62,23 +77,59 @@ def _get_backend():
 
 
 def find_bootrom():
-    """Return the pyusb device for the BootROM gadget, or None."""
+    """Return the pyusb device for the first matching BootROM identity, or None."""
     try:
         import usb.core
     except ImportError as e:
         raise UsbUnavailable(
             'pyusb is not installed - install with: pip install "sprdflash[usb]"') from e
-    return usb.core.find(idVendor=DOWNLOAD_VID, idProduct=DOWNLOAD_PID,
-                         backend=_get_backend())
+    backend = _get_backend()
+    for vid, pid in BOOTROM_IDS:
+        dev = usb.core.find(idVendor=vid, idProduct=pid, backend=backend)
+        if dev is not None:
+            log.info('BootROM device: %04x:%04x', vid, pid)
+            return dev
+    return None
+
+
+def _discover_data_interface(dev):
+    """Return (interface_number, ep_out, ep_in) for the interface carrying the
+    bulk BSL endpoints. Prefers the CDC-Data interface (class 0x0a); falls back
+    to any interface exposing both bulk directions."""
+    import usb.util
+    cfg = dev.get_active_configuration()
+    fallback = None
+    for intf in cfg:
+        ep_out = ep_in = None
+        for ep in intf:
+            if usb.util.endpoint_type(ep.bmAttributes) != usb.util.ENDPOINT_TYPE_BULK:
+                continue
+            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT:
+                ep_out = ep.bEndpointAddress
+            else:
+                ep_in = ep.bEndpointAddress
+        if ep_out is not None and ep_in is not None:
+            found = (intf.bInterfaceNumber, ep_out, ep_in)
+            if intf.bInterfaceClass == 0x0A:   # CDC-Data
+                return found
+            if fallback is None:
+                fallback = found
+    if fallback is None:
+        raise UsbUnavailable('no bulk endpoints found on the BootROM device')
+    return fallback
 
 
 class UsbPort:
     """A serial-port-like adapter (read/write/flush) over the BootROM's bulk
     endpoints, so the framed SpdIO layer can drive it unchanged."""
 
-    def __init__(self, dev, timeout: float = 2.0):
+    def __init__(self, dev, timeout: float = 2.0, interface: int = 1,
+                 ep_out: int = 0x02, ep_in: int = 0x81):
         self.dev = dev
         self.timeout_ms = int(timeout * 1000)
+        self.interface = interface
+        self.ep_out = ep_out
+        self.ep_in = ep_in
         self._rx = bytearray()
         self._opened = False
 
@@ -86,12 +137,18 @@ class UsbPort:
         import usb.util
         try:
             try:
-                if self.dev.is_kernel_driver_active(DATA_INTERFACE):
-                    self.dev.detach_kernel_driver(DATA_INTERFACE)
+                self.interface, self.ep_out, self.ep_in = _discover_data_interface(self.dev)
+            except UsbUnavailable:
+                raise
+            except Exception as e:
+                log.debug('endpoint discovery failed (%s); using defaults', e)
+            try:
+                if self.dev.is_kernel_driver_active(self.interface):
+                    self.dev.detach_kernel_driver(self.interface)
             except Exception:
                 # not supported on Windows (WinUSB has no "kernel driver" concept)
                 pass
-            usb.util.claim_interface(self.dev, DATA_INTERFACE)
+            usb.util.claim_interface(self.dev, self.interface)
             # kick the endpoints alive (vendor connect request)
             self.dev.ctrl_transfer(CTRL_REQUEST_TYPE, CTRL_REQUEST,
                                    CTRL_VALUE, CTRL_INDEX, None, self.timeout_ms)
@@ -108,7 +165,7 @@ class UsbPort:
 
     # -- serial-like API --------------------------------------------------
     def write(self, data: bytes) -> int:
-        return self.dev.write(EP_OUT, data, timeout=self.timeout_ms)
+        return self.dev.write(self.ep_out, data, timeout=self.timeout_ms)
 
     def flush(self) -> None:
         pass
@@ -116,7 +173,7 @@ class UsbPort:
     def read(self, n: int = 1) -> bytes:
         if not self._rx:
             try:
-                chunk = self.dev.read(EP_IN, 4096, timeout=self.timeout_ms)
+                chunk = self.dev.read(self.ep_in, 4096, timeout=self.timeout_ms)
                 self._rx += bytes(chunk)
             except Exception as e:
                 # a bulk-IN read with no data raises USBTimeoutError; its message
@@ -132,7 +189,7 @@ class UsbPort:
         if self._opened:
             try:
                 import usb.util
-                usb.util.release_interface(self.dev, DATA_INTERFACE)
+                usb.util.release_interface(self.dev, self.interface)
                 usb.util.dispose_resources(self.dev)
             except Exception:
                 pass
@@ -142,9 +199,10 @@ class UsbPort:
 def open_usb_port(timeout: float = 2.0) -> UsbPort:
     dev = find_bootrom()
     if dev is None:
+        ids = ', '.join(f'{v:04x}:{p:04x}' for v, p in BOOTROM_IDS)
         raise UsbUnavailable(
-            f'no BootROM device (USB {DOWNLOAD_VID:04x}:{DOWNLOAD_PID:04x}) found. '
-            'Put the module in download mode first.')
+            f'no BootROM device found (looked for {ids}). Put the module in '
+            'download mode first (USB_BOOT strap + reset, or AT*DOWNLOAD=1).')
     port = UsbPort(dev, timeout=timeout)
     port.open()
     return port

@@ -2,7 +2,9 @@
 import pytest
 
 from sprdflash import protocol as p
-from sprdflash.usb_transport import EP_IN, EP_OUT, UsbPort
+from sprdflash.usb_transport import UsbPort
+
+EP_OUT, EP_IN = 0x02, 0x81   # UsbPort defaults when open() is bypassed
 
 
 class FakeUsbDev:
@@ -62,6 +64,62 @@ class TestUsbPortAdapter:
         assert io.autobaud(attempts=2, timeout=1.0) == b'SPRD3'
         io.connect()
         assert dev.written.startswith(b'\x7e')   # the lone autobaud flag was sent
+
+
+class TestEndpointDiscovery:
+    def test_prefers_cdc_data_bulk_endpoints(self):
+        pytest.importorskip('usb.util')
+        from sprdflash.usb_transport import _discover_data_interface
+
+        class Ep:
+            def __init__(self, addr, attrs):
+                self.bEndpointAddress = addr
+                self.bmAttributes = attrs
+
+        class Intf:
+            def __init__(self, num, cls, eps):
+                self.bInterfaceNumber = num
+                self.bInterfaceClass = cls
+                self._eps = eps
+
+            def __iter__(self):
+                return iter(self._eps)
+
+        class Dev:
+            def __init__(self, intfs):
+                self._intfs = intfs
+
+            def get_active_configuration(self):
+                return self._intfs
+
+        # intf 0 = CDC-control (interrupt only), intf 1 = CDC-data (bulk 0x02/0x81)
+        comm = Intf(0, 0x02, [Ep(0x83, 0x03)])
+        data = Intf(1, 0x0A, [Ep(0x02, 0x02), Ep(0x81, 0x02)])
+        assert _discover_data_interface(Dev([comm, data])) == (1, 0x02, 0x81)
+
+    def test_falls_back_to_any_bulk_interface(self):
+        pytest.importorskip('usb.util')
+        from sprdflash.usb_transport import _discover_data_interface
+
+        class Ep:
+            def __init__(self, addr):
+                self.bEndpointAddress = addr
+                self.bmAttributes = 0x02
+
+        class Intf:
+            def __init__(self, num, cls, eps):
+                self.bInterfaceNumber = num
+                self.bInterfaceClass = cls
+                self._eps = eps
+
+            def __iter__(self):
+                return iter(self._eps)
+
+        class Dev:
+            def get_active_configuration(self):
+                return [Intf(3, 0xFF, [Ep(0x04), Ep(0x85)])]   # vendor-specific
+
+        assert _discover_data_interface(Dev()) == (3, 0x04, 0x85)
 
 
 class TestUsbUnavailable:
