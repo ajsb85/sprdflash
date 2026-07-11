@@ -41,7 +41,7 @@ class TestUsbPortAdapter:
 
     def test_read_buffers_across_calls(self):
         # one bulk-IN transfer delivers a whole frame; read(1) drains it byte by byte
-        frame = p.build_message(p.BSL_REP_VER, b'SPRD3', crc_mode=True)
+        frame = p.build_message(p.BSL_REP_VER, b'SPRD3', checksum='crc')
         dev = FakeUsbDev(in_chunks=[frame])
         port = UsbPort(dev)
         out = bytearray()
@@ -56,8 +56,8 @@ class TestUsbPortAdapter:
 
     def test_spdio_over_usb_adapter_handshakes(self):
         # a scripted device that answers VER then ACK, framed over bulk IN
-        ver = p.build_message(p.BSL_REP_VER, b'SPRD3', crc_mode=True)
-        ack = p.build_message(p.BSL_REP_ACK, b'', crc_mode=True)
+        ver = p.build_message(p.BSL_REP_VER, b'SPRD3', checksum='crc')
+        ack = p.build_message(p.BSL_REP_ACK, b'', checksum='crc')
         dev = FakeUsbDev(in_chunks=[ver, ack])
         port = UsbPort(dev)
         io = p.SpdIO(port, timeout=1.0)

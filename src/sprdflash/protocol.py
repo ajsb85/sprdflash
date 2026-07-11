@@ -78,26 +78,47 @@ def crc16(data: bytes, crc: int = 0) -> int:
     return crc
 
 
-def fdl_checksum(data: bytes) -> int:
-    """FDL-mode checksum: ones-complement sum of little-endian 16-bit words.
+def sprd_checksum(data: bytes) -> int:
+    """Spreadtrum sum checksum (ones-complement sum of little-endian 16-bit
+    words, always byte-swapped at the end).
 
-    Ported from spd_dump's spd_checksum(..., CHK_FIXZERO): if the length is
-    odd the final value is byte-swapped.
+    This is the checksum the RDA8910/UIS8910 BootROM uses for *every* packet
+    (verified byte-for-byte against the vendor ResearchDownload wire log). It
+    matches kagaimiq/sprdproto's ``calc_sprdcheck`` exactly — note the final
+    byte swap is unconditional, unlike spd_dump's odd-length-only variant.
     """
     total = 0
     i = 0
     n = len(data)
-    while n - i > 1:
+    while n - i >= 2:
         total += data[i] | (data[i + 1] << 8)
         i += 2
     if i < n:
         total += data[i]
     total = (total >> 16) + (total & 0xFFFF)
-    total += total >> 16
-    total = ~total & 0xFFFF
-    if n & 1:
-        total = ((total >> 8) | ((total & 0xFF) << 8)) & 0xFFFF
-    return total
+    total = ~(total + (total >> 16)) & 0xFFFF
+    return ((total >> 8) | ((total & 0xFF) << 8)) & 0xFFFF
+
+
+# backwards-compatible alias
+fdl_checksum = sprd_checksum
+
+
+def checksum_for(mode: str, data: bytes) -> int:
+    return crc16(data) if mode == 'crc' else sprd_checksum(data)
+
+
+def detect_checksum(frame_body: bytes) -> str | None:
+    """Given an unescaped frame body (type+len+data+checksum, no 0x7e flags),
+    return 'crc' or 'sprd' whichever checksum validates it, else None."""
+    if len(frame_body) < 6:
+        return None
+    body, chk = frame_body[:-2], (frame_body[-2] << 8) | frame_body[-1]
+    if sprd_checksum(body) == chk:
+        return 'sprd'
+    if crc16(body) == chk:
+        return 'crc'
+    return None
 
 
 def hdlc_escape(frame: bytes) -> bytes:
@@ -126,11 +147,14 @@ def hdlc_unescape(frame: bytes) -> bytes:
     return bytes(out)
 
 
-def build_message(cmd: int, data: bytes = b'', crc_mode: bool = True) -> bytes:
-    """Frame one BSL message ready for the wire (including 0x7e flags)."""
+def build_message(cmd: int, data: bytes = b'', checksum: str = 'sprd') -> bytes:
+    """Frame one BSL message ready for the wire (including 0x7e flags).
+
+    *checksum* is 'sprd' (Spreadtrum sum, used by RDA8910/UIS8910) or 'crc'
+    (CRC16, classic Spreadtrum BootROM). The checkbaud handshake detects which.
+    """
     body = struct.pack('>HH', cmd, len(data)) + data
-    chk = crc16(body) if crc_mode else fdl_checksum(body)
-    body += struct.pack('>H', chk)
+    body += struct.pack('>H', checksum_for(checksum, body))
     return bytes([HDLC_FLAG]) + hdlc_escape(body) + bytes([HDLC_FLAG])
 
 
@@ -158,7 +182,17 @@ class SpdIO:
     def __init__(self, port, timeout: float = 1.0):
         self.port = port
         self.timeout = timeout
-        self.crc_mode = True   # BootROM mode until FDL1 switches us to sum mode
+        # 'sprd' or 'crc'; the checkbaud handshake auto-detects it from VER.
+        self.checksum = 'sprd'
+
+    # crc_mode kept as a bool view for older callers
+    @property
+    def crc_mode(self) -> bool:
+        return self.checksum == 'crc'
+
+    @crc_mode.setter
+    def crc_mode(self, value: bool) -> None:
+        self.checksum = 'crc' if value else 'sprd'
 
     # -- low level ---------------------------------------------------------
     def _read_frame(self, timeout: float) -> bytes:
@@ -188,7 +222,7 @@ class SpdIO:
         raise TimeoutError('no response frame (closing flag not seen)')
 
     def send(self, cmd: int, data: bytes = b'') -> None:
-        msg = build_message(cmd, data, crc_mode=self.crc_mode)
+        msg = build_message(cmd, data, checksum=self.checksum)
         self.port.write(msg)
         self.port.flush()
 
@@ -197,17 +231,31 @@ class SpdIO:
         return parse_message(body)
 
     # -- handshakes --------------------------------------------------------
-    def autobaud(self, attempts: int = 10, timeout: float = 0.5) -> bytes:
-        """Send the lone-0x7e autobaud byte until the BootROM answers VER."""
-        for i in range(attempts):
+    def autobaud(self, attempts: int = 200, timeout: float = 0.05) -> bytes:
+        """Send lone-0x7e checkbaud bytes until the BootROM answers VER.
+
+        Matches the vendor tool's tight retry loop (short per-try timeout, many
+        retries) — the download gadget only answers within a brief window. On
+        the VER frame we also auto-detect the checksum type (sprd vs crc) that
+        the rest of the session must use.
+        """
+        for _ in range(attempts):
             self.port.write(bytes([HDLC_FLAG]))
             self.port.flush()
             try:
-                cmd, data = self.recv(timeout=timeout)
+                raw = self._read_frame(timeout)
             except (TimeoutError, ValueError):
                 continue
+            detected = detect_checksum(raw)
+            try:
+                cmd, data = parse_message(raw)
+            except ValueError:
+                continue
             if cmd == BSL_REP_VER:
-                log.info('device version: %s', data.decode('latin-1', 'replace').strip())
+                if detected:
+                    self.checksum = detected
+                log.info('device version: %s (checksum=%s)',
+                         data.decode('latin-1', 'replace').strip(), self.checksum)
                 return data
             log.debug('autobaud got %s, retrying', rep_name(cmd))
         raise ProtocolError(f'no VER response after {attempts} autobaud attempts')

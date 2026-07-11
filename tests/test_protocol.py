@@ -25,16 +25,28 @@ class TestChecksums:
         # CONNECT message body: type=0x0000 size=0x0000 -> 4 zero bytes
         assert p.crc16(b'\x00\x00\x00\x00') == 0x0000  # 4 zero bytes -> crc stays 0
 
-    def test_fdl_checksum_even_length(self):
-        # sum of little-endian words, ones-complemented
-        data = b'\x01\x00\x02\x00'   # words 1 + 2 = 3
-        assert p.fdl_checksum(data) == (~3 & 0xFFFF)
+    def test_sprd_checksum_matches_real_vendor_packets(self):
+        # Ground truth captured from the vendor ResearchDownload wire log
+        # flashing an RDA8910 (Air724UG). The device uses the SPRD sum
+        # checksum for every packet, including the BootROM-level CONNECT.
+        vectors = [
+            (bytes.fromhex('00000000'), 0xFFFF),                       # CONNECT
+            (bytes.fromhex('00800000'), 0xFF7F),                       # ACK
+            (bytes.fromhex('000900040001c200'), 0x3DF1),               # CHANGE_BAUD 115200
+            (b'\x00\x81\x00\x22' + b'Spreadtrum Boot Block version 1.2\x00', 0xA9E9),  # VER
+        ]
+        for body, want in vectors:
+            assert p.sprd_checksum(body) == want, f'{body.hex()} -> {p.sprd_checksum(body):#06x}'
 
-    def test_fdl_checksum_odd_length_byteswaps(self):
-        even = p.fdl_checksum(b'\x01\x02\x03\x04')
-        odd = p.fdl_checksum(b'\x01\x02\x03')
-        # odd path applies a byteswap; just assert it stays a u16 and differs
-        assert 0 <= odd <= 0xFFFF and odd != even
+    def test_connect_frame_matches_vendor_bytes(self):
+        # the full on-the-wire CONNECT frame the vendor sends
+        assert p.build_message(p.BSL_CMD_CONNECT, b'', checksum='sprd').hex() == '7e00000000ffff7e'
+
+    def test_detect_checksum(self):
+        ver_body = b'\x00\x81\x00\x22' + b'Spreadtrum Boot Block version 1.2\x00'
+        assert p.detect_checksum(ver_body + p.sprd_checksum(ver_body).to_bytes(2, 'big')) == 'sprd'
+        crc_body = b'\x00\x81\x00\x05SPRD3'
+        assert p.detect_checksum(crc_body + p.crc16(crc_body).to_bytes(2, 'big')) == 'crc'
 
 
 class TestHdlc:
@@ -52,7 +64,7 @@ class TestHdlc:
 
 class TestMessage:
     def test_build_connect_bootrom(self):
-        msg = p.build_message(p.BSL_CMD_CONNECT, b'', crc_mode=True)
+        msg = p.build_message(p.BSL_CMD_CONNECT, b'', checksum='crc')
         assert msg[0] == p.HDLC_FLAG and msg[-1] == p.HDLC_FLAG
         # unescape the middle and check type/size/crc
         body = p.hdlc_unescape(msg[1:-1])
@@ -62,7 +74,7 @@ class TestMessage:
 
     def test_build_parse_roundtrip_with_escapes(self):
         payload = bytes([0x7e, 0x7d, 0xaa, 0x55])
-        msg = p.build_message(p.BSL_CMD_MIDST_DATA, payload, crc_mode=False)
+        msg = p.build_message(p.BSL_CMD_MIDST_DATA, payload, checksum='sprd')
         body = p.hdlc_unescape(msg[1:-1])
         cmd, data = p.parse_message(body)
         assert cmd == p.BSL_CMD_MIDST_DATA
@@ -96,7 +108,7 @@ class FakePort:
         if self._responses:
             cmd, data = self._responses.pop(0)
             if cmd is not None:
-                self._rx += p.build_message(cmd, data, crc_mode=True)
+                self._rx += p.build_message(cmd, data, checksum='crc')
 
     def read(self, n=1):
         if not self._rx:

@@ -150,12 +150,16 @@ class UsbPort:
                 raise
             except Exception as e:
                 log.debug('endpoint discovery failed (%s); using defaults', e)
-            try:
-                if self.dev.is_kernel_driver_active(self.interface):
-                    self.dev.detach_kernel_driver(self.interface)
-            except Exception:
-                # not supported on Windows (WinUSB has no "kernel driver" concept)
-                pass
+            # On Linux the cdc_acm driver claims BOTH the control (0) and data
+            # interfaces; the vendor control transfer targets the control
+            # interface, so detach the kernel driver from every interface, not
+            # just the bulk one. (No-op on Windows/WinUSB.)
+            for intf in self._all_interface_numbers():
+                try:
+                    if self.dev.is_kernel_driver_active(intf):
+                        self.dev.detach_kernel_driver(intf)
+                except Exception:
+                    pass
             usb.util.claim_interface(self.dev, self.interface)
             # kick the endpoints alive (vendor connect request)
             self.dev.ctrl_transfer(CTRL_REQUEST_TYPE, CTRL_REQUEST,
@@ -170,6 +174,13 @@ class UsbPort:
                 'until you restore the CDC driver.') from e
         except Exception as e:
             raise UsbUnavailable(f'could not open the BootROM USB device: {e}') from e
+
+    def _all_interface_numbers(self):
+        try:
+            cfg = self.dev.get_active_configuration()
+            return [intf.bInterfaceNumber for intf in cfg]
+        except Exception:
+            return [0, self.interface]
 
     # -- serial-like API --------------------------------------------------
     def write(self, data: bytes) -> int:
