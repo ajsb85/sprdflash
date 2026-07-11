@@ -99,7 +99,18 @@ def _open_transport(transport: str, device: str | None, baudrate: int, timeout: 
     import serial
     if not device:
         raise FlashError('serial transport requires --port COMx')
-    return serial.Serial(device, baudrate, timeout=timeout, write_timeout=timeout)
+    # Use a SHORT read timeout: SpdIO._read_frame polls one byte at a time and
+    # manages its own deadline, so pyserial's per-read block must be brief -
+    # otherwise autobaud's many short retries each stall on the full port
+    # timeout. DTR/RTS are asserted so a CDC-ACM gadget's device-side port
+    # gets carrier (required for it to start responding).
+    s = serial.Serial(device, baudrate, timeout=0.02, write_timeout=timeout)
+    try:
+        s.dtr = True
+        s.rts = True
+    except (OSError, serial.SerialException):
+        pass
+    return s
 
 
 def connect_bootrom(device: str | None = None, baudrate: int = 115200,
