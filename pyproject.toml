@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sprdflash"
+version = "0.1.0"
+description = "Native flasher for SPRD/UNISOC .pac firmware (Air724UG/RDA8910) — no vendor download tool"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Alexander Salas Bastidas", email = "ajsb85@firechip.dev" }]
+keywords = ["firmware", "flash", "sprd", "unisoc", "spreadtrum", "rda8910", "air724ug", "bsl", "fdl"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Embedded Systems",
+]
+dependencies = [
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+# the RDA8910 USB gadget needs libusb bulk access (WinUSB driver via Zadig)
+usb = ["pyusb>=1.2", "libusb-package>=1.0"]
+
+[project.scripts]
+sprdflash = "sprdflash.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ajsb85/sprdflash"
+Issues = "https://github.com/ajsb85/sprdflash/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sprdflash"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
