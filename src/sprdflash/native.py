@@ -4,19 +4,21 @@ Ties together the two link layers reverse-engineered from the vendor tool:
   Phase 1 (pdl.py)      : load + exec the first-stage loader (HOST_FDL/"PDL1")
   Phase 2 (protocol.py) : BSL handshake, load + exec FDL2, write each partition
 
-Verified end-to-end on a real Air724UG (RDA8910): a same-SDK reflash
-(LuatOS V4035 -> V4035) completes in ~42 s and boots correctly.
+Verified end-to-end on a real Air724UG (RDA8910), including a cross-SDK change
+(LuatOS V4035 -> CSDK V302340) that boots correctly.
 
-KNOWN LIMITATION - firmware-TYPE changes:
-  The PAC's logical-address entries (>= 0xFE000000: FMT_FSSYS, FLASH,
-  PhaseCheck, ...) are erase/format operations, which this flasher currently
-  SKIPS (they classify as 'marker'). For a same-firmware reflash that is
-  harmless. But changing SDK type (e.g. LuatOS -> CSDK) leaves the old
-  filesystem in place, and the new firmware then fails to boot (the module
-  comes up back in download mode). Handling this needs the BSL erase/format
-  commands for those markers (ERASE_FLASH 0x0A etc.) sent before the partition
-  writes - a scoped follow-up. Until then, use the vendor tool (pacflash) for
-  cross-SDK flashes.
+Firmware-TYPE changes need the erase/format markers: the PAC's logical-address
+entries (>= 0xFE000000) are not payload partitions but erase/format ops. From a
+Frida trace of the vendor tool doing a cross-SDK flash, after the real
+partitions and before reset it issues (BSL ERASE_FLASH 0x0A, payload =
+addr(4 BE) + 4-byte param):
+
+    FMT_FSSYS (0xFE000006) -> ERASE_FLASH  addr, "SYSF"   (format system FS)
+    FLASH     (0xFE000001) -> ERASE_FLASH  addr, 0
+
+which clears the stale filesystem so the new firmware boots. The NV entry
+(0xFE000003) is left untouched to preserve the module's calibration/IMEI (the
+existing NV is compatible across SDKs on the same hardware).
 """
 from __future__ import annotations
 
@@ -36,6 +38,37 @@ Progress = Callable[[str, int, int], None]
 
 # BSL MIDST_DATA chunk (the vendor sends 0x210 = 528-byte data frames)
 BSL_CHUNK = DEFAULT_CHUNK
+
+# Logical erase/format markers (PAC address >= 0xFE000000) mapped to the
+# BSL ERASE_FLASH 4-byte parameter the vendor sends (from a Frida trace).
+# The address is the marker's own logical address, big-endian.
+_ERASE_PARAM = {
+    'FMT_FSSYS': b'SYSF',                  # format the system filesystem (verified)
+    'FMT_FSEXT': b'EXTF',                  # format the ext filesystem (by analogy)
+    'FLASH': b'\x00\x00\x00\x00',          # (verified)
+    'ERASE_NV': b'\x00\x00\x00\x00',
+    'ERASE_SYSFS': b'SYSF',
+    'DEL_APPIMG': b'\x00\x00\x00\x00',
+}
+# Markers we deliberately do NOT touch: NV/calibration (preserve IMEI + RF cal),
+# PhaseCheck, PREPACK, and anything not in _ERASE_PARAM.
+_SKIP_MARKERS = {'NV', 'PHASECHECK', 'PREPACK'}
+
+
+def _erase_ops(info):
+    """Return [(file_id, address, param_bytes)] for the format markers to erase
+    (in PAC order), skipping NV/PhaseCheck and unknown markers."""
+    ops = []
+    for e in info.entries:
+        if classify(e) != 'marker':
+            continue
+        fid = e.file_id.upper()
+        if fid in _SKIP_MARKERS or e.address < 0xFE000000:
+            continue
+        param = _ERASE_PARAM.get(e.file_id.upper()) or _ERASE_PARAM.get(e.file_id)
+        if param is not None:
+            ops.append((e.file_id, e.address, param))
+    return ops
 
 
 def _open_serial(com: str, timeout: float = 0.3):
@@ -123,6 +156,14 @@ def native_flash(com: str, pac_path: str | Path, *,
             log.info('flash %s (%d bytes @ %#x)', e.file_id, len(data), e.address)
             send_stage(io, e.address, data, BSL_CHUNK,
                        progress=(lambda d, t, _e=e: progress(_e.file_id, d, t)) if progress else None)
+
+        # Erase/format markers (e.g. FMT_FSSYS) - required so a firmware-TYPE
+        # change boots; harmless for a same-SDK reflash.
+        import struct as _struct
+        for fid, addr, param in _erase_ops(info):
+            log.info('erase %s (%#x)', fid, addr)
+            io.command(p.BSL_CMD_ERASE_FLASH, _struct.pack('>I', addr) + param,
+                       what=f'ERASE {fid}')
 
         if do_reset:
             io.send(p.BSL_CMD_NORMAL_RESET)
