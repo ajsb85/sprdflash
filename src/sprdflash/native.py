@@ -15,12 +15,15 @@ from typing import Callable
 
 from . import pdl
 from . import protocol as p
-from .flasher import classify, send_stage
+from .flasher import DEFAULT_CHUNK, classify, send_stage
 from .pac import parse_pac
 
 log = logging.getLogger('sprdflash')
 
 Progress = Callable[[str, int, int], None]
+
+# BSL MIDST_DATA chunk (the vendor sends 0x210 = 528-byte data frames)
+BSL_CHUNK = DEFAULT_CHUNK
 
 
 def _open_serial(com: str, timeout: float = 0.3):
@@ -59,7 +62,8 @@ def native_flash(com: str, pac_path: str | Path, *,
     """Flash *pac_path* to the module on serial port *com*, entirely natively.
 
     The module must already be in download mode (0525:a4a7 / COM port). The
-    PDL END checksum for FDL1 is not verified by the agent, so it defaults to 0.
+    PDL END checksum for FDL1 is not verified by the agent (confirmed on
+    hardware: a full flash with checksum=0 boots correctly), so it defaults to 0.
     """
     pac_path = Path(pac_path)
     info = parse_pac(pac_path, verify_payload=True)
@@ -97,7 +101,7 @@ def native_flash(com: str, pac_path: str | Path, *,
         io.connect()
         if fdl2:
             log.info('BSL load FDL2 (%d bytes @ %#x)', len(fdl2_data), fdl2.address)
-            send_stage(io, fdl2.address, fdl2_data,
+            send_stage(io, fdl2.address, fdl2_data, BSL_CHUNK,
                        progress=(lambda d, t: progress('FDL2', d, t)) if progress else None)
             io.command(p.BSL_CMD_EXEC_DATA, timeout=15.0, what='EXEC FDL2')
             io.connect()   # re-handshake under FDL2 (vendor "Connect2")
@@ -105,7 +109,7 @@ def native_flash(com: str, pac_path: str | Path, *,
         for e in partitions:
             data = part_data[e.file_id]
             log.info('flash %s (%d bytes @ %#x)', e.file_id, len(data), e.address)
-            send_stage(io, e.address, data,
+            send_stage(io, e.address, data, BSL_CHUNK,
                        progress=(lambda d, t, _e=e: progress(_e.file_id, d, t)) if progress else None)
 
         if do_reset:

@@ -68,23 +68,42 @@ device's own USB descriptor.
   **while WinUSB is bound, the vendor tool and pacflash cannot use the device**
   (they need the COM driver) — swap back to restore them.
 
-## Status
+## Status: verified end-to-end on real hardware
 
-- **`info` is complete and verified** against real firmware (parses and
-  CRC-validates the full partition table).
-- **`identify` and `flash`** implement the full BSL handshake and flow over the
-  libusb transport, with 16 protocol-level tests. End-to-end flashing was **not**
-  run against the live module in this environment because it would require
-  swapping the module off the CDC driver (which the working
-  [pacflash](https://github.com/ajsb85/pacflash) setup depends on). Once WinUSB
-  is bound, `identify` is the safe first check — it performs the read-only
-  autobaud + CONNECT handshake.
+`sprdflash` flashed the full 6 MB firmware to an **Air724UG (RDA8910) in ~42 s
+with no vendor tool**, and the module rebooted into the flashed firmware
+(`ATI` reported `LuatOS-Air_V4035_...`, IMEI intact, SIM `READY`).
 
-You cannot brick the BootROM: a failed FDL load just means re-entering download
-mode and trying again. If in doubt, use pacflash (drives the vendor tool) — it
-needs no driver change.
+The reverse engineering that made it work: the RDA8910 download agent reached
+via `AT*DOWNLOAD` (`0525:a4a7`) does **not** speak BSL in its first stage. It
+speaks a proprietary **PDL** (Packet Download Loader) protocol — `ae`-framed,
+over the vendor `sprd_rdavcom` COM port — to load and execute the first-stage
+loader (`PDL1` / HOST_FDL). Only *after* FDL1 runs does the device switch to the
+BSL/HDLC protocol for FDL2 and the partitions. Both layers are implemented here
+(`pdl.py`, `protocol.py`) and stitched together in `native.py`. The PDL wire
+format was recovered by tracing the vendor `ResearchDownload.exe` with Frida.
+
+You cannot brick the BootROM: a failed load just means re-entering download mode
+and retrying. If a device gets stuck mid-attempt, a USB device restart
+(`pnputil /restart-device`, elevated) or a power-cycle resets its agent.
 
 ## Example
+
+```
+# module in download mode (AT*DOWNLOAD, or hold the boot key at power-on)
+
+> sprdflash flash LuatOS-Air_V4035_RDA8910_TTS_NOVOLTE_FLOAT.pac
+native-flashing ... via COM34 (PDL+BSL, no vendor tool)
+  FDL1           100%
+  FDL2           100%
+  BOOTLOADER     100%
+  AP             100%
+  PS             100%
+  LUA            100%
+flash complete - module reboots into the new firmware
+```
+
+### Older USB/BSL transport notes (superseded by the PDL/COM path above)
 
 ```
 # one-time: Zadig -> USB 0525:A4A7 -> WinUSB -> Replace Driver

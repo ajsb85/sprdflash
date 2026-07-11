@@ -77,15 +77,14 @@ def _cmd_info(args: argparse.Namespace) -> int:
 
 
 def _cmd_flash(args: argparse.Namespace) -> int:
-    from .flasher import FlashError, flash_pac
+    from . import native, pdl
     pac_path = Path(args.pac).resolve()
     info = parse_pac(pac_path, verify_payload=not args.no_verify)
     if not info.crc_ok and not args.force:
         log.error('PAC checksum mismatch - refusing to flash (use --force to override)')
         return 2
-    port = None if args.transport == 'usb' else _resolve_port(args.port)
-    print(f'native-flashing {pac_path.name} via {args.transport}'
-          + (f' ({port})' if port else ''))
+    port = _resolve_port(args.port)   # the download-mode COM port (0525:a4a7)
+    print(f'native-flashing {pac_path.name} via {port} (PDL+BSL, no vendor tool)')
 
     state = {'file': None, 'pct': -1}
 
@@ -101,14 +100,13 @@ def _cmd_flash(args: argparse.Namespace) -> int:
             print(f'\r  {file_id:<14} {pct:3d}%', end='', flush=True)
 
     try:
-        flash_pac(port, pac_path, baudrate=args.baud, chunk=args.chunk,
-                  do_reset=not args.no_reset, progress=progress,
-                  timeout=args.timeout, transport=args.transport)
-    except FlashError as e:
+        native.native_flash(port, pac_path, progress=progress,
+                            do_reset=not args.no_reset)
+    except pdl.PdlError as e:
         print()
         log.error('%s', e)
         return 4
-    print('\nflash complete')
+    print('\nflash complete - module reboots into the new firmware')
     return 0
 
 
@@ -135,16 +133,14 @@ def build_parser() -> argparse.ArgumentParser:
     pid.add_argument('--timeout', type=float, default=2.0)
     pid.set_defaults(fn=_cmd_identify)
 
-    pf = sub.add_parser('flash', help='flash a .pac natively over the BootROM protocol')
+    pf = sub.add_parser('flash', help='flash a .pac natively (PDL+BSL, no vendor tool)')
     pf.add_argument('pac')
-    pf.add_argument('--transport', choices=['usb', 'serial'], default='usb',
-                    help='usb = libusb bulk (RDA8910 gadget); serial = plain UART')
-    pf.add_argument('--port', help='serial download port (serial transport only)')
-    pf.add_argument('--baud', type=int, default=115200)
-    pf.add_argument('--chunk', type=int, default=528, help='MIDST_DATA chunk size')
-    pf.add_argument('--timeout', type=float, default=2.0)
-    pf.add_argument('--no-verify', action='store_true')
-    pf.add_argument('--force', action='store_true')
+    pf.add_argument('--port', help='download-mode COM port (e.g. COM34); '
+                                   'auto-detected (0525:a4a7) if omitted')
+    pf.add_argument('--no-verify', action='store_true',
+                    help='skip the payload CRC check before flashing')
+    pf.add_argument('--force', action='store_true',
+                    help='flash even if the PAC checksum does not match')
     pf.add_argument('--no-reset', action='store_true', help='do not reset after flashing')
     pf.set_defaults(fn=_cmd_flash)
     return parser

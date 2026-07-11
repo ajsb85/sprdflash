@@ -80,7 +80,8 @@ class PdlIO:
                     # resync to magic
                     idx = buf.find(bytes([PDL_MAGIC]))
                     if idx < 0:
-                        buf.clear(); continue
+                        buf.clear()
+                        continue
                     del buf[:idx]
                 if len(buf) >= 8:
                     rlen = buf[1] | (buf[2] << 8)
@@ -125,8 +126,10 @@ class PdlIO:
         """
         import time
         header, body = build(params(PDL_EXEC))
-        self.port.write(header); self.port.flush()
-        self.port.write(body); self.port.flush()
+        self.port.write(header)
+        self.port.flush()
+        self.port.write(body)
+        self.port.flush()
         # now the BSL checkbaud handshake; retry the lone 0x7e until VER
         deadline = time.monotonic() + timeout
         buf = bytearray()
@@ -134,7 +137,8 @@ class PdlIO:
         while time.monotonic() < deadline:
             now = time.monotonic()
             if now >= next_kick:
-                self.port.write(b'\x7e'); self.port.flush()
+                self.port.write(b'\x7e')
+                self.port.flush()
                 next_kick = now + 0.05
             b = self.port.read(64)
             if b:
