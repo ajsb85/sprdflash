@@ -4,7 +4,19 @@ Ties together the two link layers reverse-engineered from the vendor tool:
   Phase 1 (pdl.py)      : load + exec the first-stage loader (HOST_FDL/"PDL1")
   Phase 2 (protocol.py) : BSL handshake, load + exec FDL2, write each partition
 
-Both phases were validated on a real Air724UG (RDA8910).
+Verified end-to-end on a real Air724UG (RDA8910): a same-SDK reflash
+(LuatOS V4035 -> V4035) completes in ~42 s and boots correctly.
+
+KNOWN LIMITATION - firmware-TYPE changes:
+  The PAC's logical-address entries (>= 0xFE000000: FMT_FSSYS, FLASH,
+  PhaseCheck, ...) are erase/format operations, which this flasher currently
+  SKIPS (they classify as 'marker'). For a same-firmware reflash that is
+  harmless. But changing SDK type (e.g. LuatOS -> CSDK) leaves the old
+  filesystem in place, and the new firmware then fails to boot (the module
+  comes up back in download mode). Handling this needs the BSL erase/format
+  commands for those markers (ERASE_FLASH 0x0A etc.) sent before the partition
+  writes - a scoped follow-up. Until then, use the vendor tool (pacflash) for
+  cross-SDK flashes.
 """
 from __future__ import annotations
 
