@@ -39,7 +39,7 @@ packages = ["src/sprdflash"]
 target-version = "py310"
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = ["refs"]
+extend-exclude = ["tools", "refs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
