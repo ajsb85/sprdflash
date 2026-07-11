@@ -23,3 +23,6 @@ Thumbs.db
 
 # Firmware images are inputs, never repo content
 *.pac
+
+# cloned reference repos (not part of this project)
+refs/

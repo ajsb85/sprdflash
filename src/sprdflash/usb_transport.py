@@ -46,11 +46,19 @@ BOOTROM_IDS = [
     (0x0525, 0xA4A7),   # SPRD U2S Diag (soft download)
 ]
 
-# vendor connect kick (see module docstring)
+# Vendor "activate the port" control transfer, required before the bulk
+# endpoints respond. Values from kagaimiq/sprdproto (proven against real
+# Spreadtrum BootROMs): CDC SET_CONTROL_LINE_STATE (bRequest 0x22) with the
+# Spreadtrum-specific wValue 0x601. (The earlier 0x00/0x01 from sprdclient did
+# not wake this gadget.)
 CTRL_REQUEST_TYPE = 0x21
-CTRL_REQUEST = 0x00
-CTRL_VALUE = 0x01
+CTRL_REQUEST = 0x22
+CTRL_VALUE = 0x0601
 CTRL_INDEX = 0x00
+
+# Bulk writes are chunked to the endpoint's max packet size (sprdproto notes a
+# 64-byte endpoint quirk where oversized transfers are dropped).
+MAX_EP_CHUNK = 64
 
 
 class UsbUnavailable(RuntimeError):
@@ -165,7 +173,13 @@ class UsbPort:
 
     # -- serial-like API --------------------------------------------------
     def write(self, data: bytes) -> int:
-        return self.dev.write(self.ep_out, data, timeout=self.timeout_ms)
+        # chunk to the endpoint max-packet size (sprdproto endpoint quirk)
+        sent = 0
+        while sent < len(data):
+            piece = data[sent:sent + MAX_EP_CHUNK]
+            self.dev.write(self.ep_out, piece, timeout=self.timeout_ms)
+            sent += len(piece)
+        return sent
 
     def flush(self) -> None:
         pass
