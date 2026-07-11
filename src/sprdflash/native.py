@@ -100,6 +100,30 @@ def _read_entry(f, entry):
     return f.read(entry.size)
 
 
+# NV read-back chunk the vendor uses (0x3000 = 12288 bytes per READ_FLASH).
+NV_READ_CHUNK = 0x3000
+
+
+def _read_flash(io: 'p.SpdIO', addr: int, total: int, chunk: int = NV_READ_CHUNK) -> bytes:
+    """BSL READ_FLASH: read *total* bytes from logical *addr* in chunks.
+
+    Payload = addr(4 BE) | size(4 BE) | offset(4 BE); reply BSL_REP_READ_FLASH
+    (0x93) carries the data. Used to back up NV/calibration before a format.
+    """
+    import struct as _s
+    out = bytearray()
+    off = 0
+    while off < total:
+        n = min(chunk, total - off)
+        io.send(p.BSL_CMD_READ_FLASH, _s.pack('>III', addr, n, off))
+        rtype, rdata = io.recv(timeout=3.0)
+        if rtype != p.BSL_REP_READ_FLASH:
+            raise pdl.PdlError(f'READ_FLASH @ {addr:#x}+{off}: got {p.rep_name(rtype)}')
+        out += rdata
+        off += n
+    return bytes(out)
+
+
 def native_flash(com: str, pac_path: str | Path, *,
                  progress: Progress | None = None,
                  fdl1_end_checksum: int = 0,
@@ -151,6 +175,19 @@ def native_flash(com: str, pac_path: str | Path, *,
             io.command(p.BSL_CMD_EXEC_DATA, timeout=15.0, what='EXEC FDL2')
             io.connect()   # re-handshake under FDL2 (vendor "Connect2")
 
+        # Back up NV/calibration before the format erases wipe it (the vendor
+        # reads NV here, right after FDL2, then restores it after the erases so
+        # the IMEI/RF calibration survives a filesystem format).
+        nv = next((e for e in info.entries if e.file_id.upper() == 'NV'
+                   and e.address >= 0xFE000000 and e.size), None)
+        nv_backup = None
+        if nv and _erase_ops(info):
+            log.info('read NV (%d bytes @ %#x) for backup', nv.size, nv.address)
+            try:
+                nv_backup = _read_flash(io, nv.address, nv.size)
+            except pdl.PdlError as e:
+                log.warning('NV backup failed (%s); leaving NV untouched', e)
+
         for e in partitions:
             data = part_data[e.file_id]
             log.info('flash %s (%d bytes @ %#x)', e.file_id, len(data), e.address)
@@ -164,6 +201,12 @@ def native_flash(com: str, pac_path: str | Path, *,
             log.info('erase %s (%#x)', fid, addr)
             io.command(p.BSL_CMD_ERASE_FLASH, _struct.pack('>I', addr) + param,
                        what=f'ERASE {fid}')
+
+        # Restore the backed-up NV so calibration/IMEI survive the format.
+        if nv_backup is not None:
+            log.info('restore NV (%d bytes @ %#x)', len(nv_backup), nv.address)
+            send_stage(io, nv.address, nv_backup, BSL_CHUNK,
+                       progress=(lambda d, t: progress('NV', d, t)) if progress else None)
 
         if do_reset:
             io.send(p.BSL_CMD_NORMAL_RESET)
