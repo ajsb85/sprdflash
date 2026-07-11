@@ -101,7 +101,7 @@ def _cmd_flash(args: argparse.Namespace) -> int:
 
     try:
         native.native_flash(port, pac_path, progress=progress,
-                            do_reset=not args.no_reset)
+                            format_fs=args.format, do_reset=not args.no_reset)
     except pdl.PdlError as e:
         print()
         log.error('%s', e)
@@ -141,6 +141,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help='skip the payload CRC check before flashing')
     pf.add_argument('--force', action='store_true',
                     help='flash even if the PAC checksum does not match')
+    pf.add_argument('--format', action='store_true',
+                    help='also format the filesystem (needed when changing '
+                         'firmware TYPE, e.g. LuatOS<->CSDK; experimental)')
     pf.add_argument('--no-reset', action='store_true', help='do not reset after flashing')
     pf.set_defaults(fn=_cmd_flash)
     return parser

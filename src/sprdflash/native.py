@@ -127,12 +127,21 @@ def _read_flash(io: 'p.SpdIO', addr: int, total: int, chunk: int = NV_READ_CHUNK
 def native_flash(com: str, pac_path: str | Path, *,
                  progress: Progress | None = None,
                  fdl1_end_checksum: int = 0,
+                 format_fs: bool = False,
                  do_reset: bool = True) -> None:
     """Flash *pac_path* to the module on serial port *com*, entirely natively.
 
     The module must already be in download mode (0525:a4a7 / COM port). The
     PDL END checksum for FDL1 is not verified by the agent (confirmed on
     hardware: a full flash with checksum=0 boots correctly), so it defaults to 0.
+
+    *format_fs* controls the destructive filesystem format needed when changing
+    firmware TYPE (e.g. LuatOS -> CSDK). Default False = write the payload
+    partitions only, which is the proven, safe path for a same-SDK reflash.
+    Set True for a cross-SDK change: it additionally issues the PAC's ERASE/
+    format markers (FMT_FSSYS etc.) and backs up + restores NV around them.
+    NOTE: the cross-SDK NV restore is still EXPERIMENTAL (the NV write can
+    return OPERATION_FAILED); use the vendor tool if it fails.
     """
     pac_path = Path(pac_path)
     info = parse_pac(pac_path, verify_payload=True)
@@ -175,16 +184,15 @@ def native_flash(com: str, pac_path: str | Path, *,
             io.command(p.BSL_CMD_EXEC_DATA, timeout=15.0, what='EXEC FDL2')
             io.connect()   # re-handshake under FDL2 (vendor "Connect2")
 
-        # Back up NV/calibration before the format erases wipe it (the vendor
-        # reads NV here, right after FDL2, then restores it after the erases so
-        # the IMEI/RF calibration survives a filesystem format).
+        # Back up NV/calibration before the format erases wipe it (cross-SDK
+        # only): read it here, restore after the erases so IMEI/RF cal survives.
         nv = next((e for e in info.entries if e.file_id.upper() == 'NV'
                    and e.address >= 0xFE000000 and e.size), None)
         nv_backup = None
-        if nv and _erase_ops(info):
+        if format_fs and nv and _erase_ops(info):
             log.info('read NV (%d bytes @ %#x) for backup', nv.size, nv.address)
             try:
-                nv_backup = _read_flash(io, nv.address, nv.size)
+                nv_backup = _read_flash(io, nv.address, nv.size)[:nv.size]
             except pdl.PdlError as e:
                 log.warning('NV backup failed (%s); leaving NV untouched', e)
 
@@ -194,19 +202,18 @@ def native_flash(com: str, pac_path: str | Path, *,
             send_stage(io, e.address, data, BSL_CHUNK,
                        progress=(lambda d, t, _e=e: progress(_e.file_id, d, t)) if progress else None)
 
-        # Erase/format markers (e.g. FMT_FSSYS) - required so a firmware-TYPE
-        # change boots; harmless for a same-SDK reflash.
-        import struct as _struct
-        for fid, addr, param in _erase_ops(info):
-            log.info('erase %s (%#x)', fid, addr)
-            io.command(p.BSL_CMD_ERASE_FLASH, _struct.pack('>I', addr) + param,
-                       what=f'ERASE {fid}')
-
-        # Restore the backed-up NV so calibration/IMEI survive the format.
-        if nv_backup is not None:
-            log.info('restore NV (%d bytes @ %#x)', len(nv_backup), nv.address)
-            send_stage(io, nv.address, nv_backup, BSL_CHUNK,
-                       progress=(lambda d, t: progress('NV', d, t)) if progress else None)
+        # Erase/format markers (e.g. FMT_FSSYS): only for a firmware-TYPE change
+        # (--format). A same-SDK reflash keeps the existing filesystem and NV.
+        if format_fs:
+            import struct as _struct
+            for fid, addr, param in _erase_ops(info):
+                log.info('erase %s (%#x)', fid, addr)
+                io.command(p.BSL_CMD_ERASE_FLASH, _struct.pack('>I', addr) + param,
+                           what=f'ERASE {fid}')
+            if nv_backup is not None:
+                log.info('restore NV (%d bytes @ %#x)', len(nv_backup), nv.address)
+                send_stage(io, nv.address, nv_backup, BSL_CHUNK,
+                           progress=(lambda d, t: progress('NV', d, t)) if progress else None)
 
         if do_reset:
             io.send(p.BSL_CMD_NORMAL_RESET)
