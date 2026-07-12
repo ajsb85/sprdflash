@@ -142,8 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument('--force', action='store_true',
                     help='flash even if the PAC checksum does not match')
     pf.add_argument('--format', action='store_true',
-                    help='also format the filesystem (needed when changing '
-                         'firmware TYPE, e.g. LuatOS<->CSDK; experimental)')
+                    help='also format the filesystem + refresh NV/prepack '
+                         '(needed when changing firmware TYPE, e.g. LuatOS<->CSDK)')
     pf.add_argument('--no-reset', action='store_true', help='do not reset after flashing')
     pf.set_defaults(fn=_cmd_flash)
     return parser

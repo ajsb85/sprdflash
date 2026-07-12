@@ -87,6 +87,30 @@ You cannot brick the BootROM: a failed load just means re-entering download mode
 and retrying. If a device gets stuck mid-attempt, a USB device restart
 (`pnputil /restart-device`, elevated) or a power-cycle resets its agent.
 
+## Cross-SDK flashing (`--format`), also verified end-to-end
+
+A same-SDK reflash writes the payload partitions only. Changing firmware **type**
+(e.g. LuatOS `V4035` ⇄ CSDK `V302340`) additionally needs the PAC's logical
+`0xFE0000xx` markers, which `--format` replays exactly as the vendor tool does —
+reverse-engineered byte-for-byte from a Frida trace and confirmed on hardware
+(the module boots the new SDK on the soft reset, IMEI and network intact):
+
+- **`FMT_FSSYS` → `ERASE_FLASH "SYSF"`** and **`FLASH` → `ERASE_FLASH 0`** format
+  the stale filesystem (`FMT_FSEXT` shares the address and is not a second erase).
+- **`NV`** is written from the PAC's nvitem template with a 12-byte `START_DATA`
+  (`addr | size | sum32`) that `END_DATA` verifies. The template's leading
+  **CRC-16-ARC** is recomputed first — the FDL2 validates it and rejects a stale
+  one with `OPERATION_FAILED`. IMEI/RF-calibration live in a separate `factorynv`
+  region the format never touches, so they survive the SDK change.
+- **`PREPACK`** (the prepack cpio) is written plain after NV.
+- After `NORMAL_RESET` the frame is flushed and the port held briefly before
+  closing; closing immediately cancels the in-flight reset and the module returns
+  to download mode instead of booting.
+
+```
+> sprdflash flash --format LuatOS-Air_V302340_CSDK_BT_TTS_elua.pac
+```
+
 ## Example
 
 ```
